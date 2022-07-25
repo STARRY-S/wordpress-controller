@@ -1,0 +1,9 @@
+apiVersion: controller.hxstarrys.me/v1
+kind: Wordpress
+metadata:
+  name: wordpress-example
+spec:
+  dbVersion: "5.7"
+  wpVersion: "4.8-apache"
+  deploymentName: "wordpress-example"
+  replicas: 1
