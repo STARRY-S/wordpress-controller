@@ -5,5 +5,5 @@ metadata:
 spec:
   dbVersion: "5.7"
   wpVersion: "4.8-apache"
-  deploymentName: "wordpress-example"
+  deploymentName: wordpress-example
   replicas: 1
