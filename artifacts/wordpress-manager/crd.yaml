@@ -18,6 +18,10 @@ spec:
               properties:
                 deploymentName:
                   type: string
+                dbVersion:
+                  type: string
+                wpVersion:
+                  type: string
                 replicas:
                   type: integer
                   minimum: 1
