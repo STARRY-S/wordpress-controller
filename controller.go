@@ -51,8 +51,8 @@ type Controller struct {
 
 	deploymentsLister appslisters.DeploymentLister
 	deploymentsSynced cache.InformerSynced
-	wordpressLister   listers.WordpressLister
-	wordpressSynced   cache.InformerSynced
+	wordpressesLister listers.WordpressLister
+	wordpressesSynced cache.InformerSynced
 
 	// rate limited workqueue
 	workqueue workqueue.RateLimitingInterface
@@ -70,7 +70,7 @@ func NewController(
 	// add wordpress-controller types to the default Kubernetes Scheme
 	// so events can be logged for wordpress-controller types
 	utilruntime.Must(wordpressscheme.AddToScheme(scheme.Scheme))
-	klog.V(4).Info("Creating event broadcaster")
+	klog.Info("Creating event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(
@@ -89,11 +89,11 @@ func NewController(
 		wordpressClientset: wordpressClientset,
 		deploymentsLister:  deploymentInformer.Lister(),
 		deploymentsSynced:  deploymentInformer.Informer().HasSynced,
-		wordpressLister:    wordpressInformer.Lister(),
-		wordpressSynced:    wordpressInformer.Informer().HasSynced,
+		wordpressesLister:  wordpressInformer.Lister(),
+		wordpressesSynced:  wordpressInformer.Informer().HasSynced,
 		workqueue: workqueue.NewNamedRateLimitingQueue(
 			workqueue.DefaultControllerRateLimiter(),
-			"Wordpress",
+			"Wordpresses",
 		),
 		recorder: recorder,
 	}
@@ -103,15 +103,19 @@ func NewController(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: controller.enqueueWordpress,
 			UpdateFunc: func(old, new interface{}) {
+				fmt.Println("XXXX wpInformer UpdateFunc triggered")
 				controller.enqueueWordpress(new)
 			},
-			DeleteFunc: func(obj interface{}) {},
+			DeleteFunc: func(obj interface{}) {
+				fmt.Println("XXXX wpInformer delete func triggered!")
+			},
 		},
 	)
 	deploymentInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: controller.handleObject,
 			UpdateFunc: func(oldObj, newObj interface{}) {
+				fmt.Println("XXXX dpInformer UpdateFunc triggered")
 				newDepl := newObj.(*appsv1.Deployment)
 				oldDepl := oldObj.(*appsv1.Deployment)
 				if newDepl.ResourceVersion == oldDepl.ResourceVersion {
@@ -138,7 +142,8 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}) error {
 
 	// Wait for the caches to be synced before starting workers
 	klog.Info("Waiting for informer caches to sync")
-	ok := cache.WaitForCacheSync(stopCh, c.deploymentsSynced, c.wordpressSynced)
+	ok := cache.WaitForCacheSync(
+		stopCh, c.deploymentsSynced, c.wordpressesSynced)
 	if !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
@@ -220,7 +225,7 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
-	wp, err := c.wordpressLister.Wordpresses(namespace).Get(name)
+	wp, err := c.wordpressesLister.Wordpresses(namespace).Get(name)
 	if err != nil {
 		// the wordpress resource may no longer exist
 		if errors.IsNotFound(err) {
@@ -229,24 +234,27 @@ func (c *Controller) syncHandler(key string) error {
 					key))
 			return nil
 		}
+		klog.Info("XXXX0")
 		return err
 	}
 	deploymentName := wp.Spec.DeploymentName
 	if deploymentName == "" {
-		err := fmt.Errorf("%s deplotment name must be specified", key)
-		utilruntime.HandleError(err)
+		err2 := fmt.Errorf("%s deplotment name must be specified", key)
+		utilruntime.HandleError(err2)
 		return nil
 	}
 
 	deployment, err := c.deploymentsLister.
 		Deployments(wp.Namespace).Get(deploymentName)
 	if errors.IsNotFound(err) {
+		klog.Info("XXXX not found")
 		deployment, err = c.kubeClientset.
 			AppsV1().Deployments(wp.Namespace).
 			Create(context.TODO(), newDeployment(wp), metav1.CreateOptions{})
 	}
 
 	if err != nil {
+		klog.Info("XXXX2")
 		return err
 	}
 
@@ -257,19 +265,23 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	if wp.Spec.Replicas != nil &&
-		*&wp.Spec.Replicas != *&deployment.Spec.Replicas {
-		klog.Info("Wordpress %s replicas: %d, deployment replicas %d",
+		*wp.Spec.Replicas != *deployment.Spec.Replicas {
+		klog.Infof("Wordpress %s replicas: %d, deployment replicas %d",
 			name, *wp.Spec.Replicas, *deployment.Spec.Replicas)
 		deployment, err = c.kubeClientset.AppsV1().Deployments(wp.Namespace).
 			Update(context.TODO(), newDeployment(wp), metav1.UpdateOptions{})
 	}
 
 	if err != nil {
+		klog.Info("XXXX3")
 		return err
 	}
 
+	// Finally, we update the status block of the Foo resource to reflect the
+	// current state of the world
 	err = c.updateWordpressStatus(wp, deployment)
 	if err != nil {
+		klog.Info("XXXX4")
 		return err
 	}
 
@@ -283,12 +295,22 @@ func (c *Controller) updateWordpressStatus(
 	deployment *appsv1.Deployment,
 ) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
-	// You can use DeepCopy() to make a deep copy of original object and modify this copy
-	// Or create a copy manually for better performance
+	// You can use DeepCopy() to make a deep copy of original object and modify
+	// this copy or create a copy manually for better performance
 	wpCopy := wp.DeepCopy()
 	wpCopy.Status.AvailableReplicas = deployment.Status.Replicas
-	_, err := c.wordpressClientset.ControllerV1().Wordpresses(wp.Namespace).
+	wpInterface := c.wordpressClientset.ControllerV1().Wordpresses(wp.Namespace)
+	klog.Infof("Name: %s, Namespace: %s, WpVersion: %s, DeploymentName: %s",
+		wpCopy.Name, wpCopy.Namespace, wpCopy.Spec.WpVersion,
+		wpCopy.Spec.DeploymentName)
+	klog.Infof("Group: %s",
+		wpCopy.GroupVersionKind().Group)
+	_, err := wpInterface.
 		UpdateStatus(context.TODO(), wpCopy, metav1.UpdateOptions{})
+
+	if err != nil {
+		klog.Infof("---XXXX error: %s", err.Error())
+	}
 	return err
 }
 
@@ -300,6 +322,7 @@ func (c *Controller) enqueueWordpress(obj interface{}) {
 		utilruntime.HandleError(err)
 		return
 	}
+	klog.Info("XXXXXXXX--- key: ", key)
 	c.workqueue.Add(key)
 }
 
@@ -328,7 +351,7 @@ func (c *Controller) handleObject(obj interface{}) {
 			return
 		}
 
-		wp, err := c.wordpressLister.Wordpresses(object.GetNamespace()).
+		wp, err := c.wordpressesLister.Wordpresses(object.GetNamespace()).
 			Get(ownerRef.Name)
 		if err != nil {
 			klog.Infof("ignoring orphaned object %s/%s of wordpress %s",
@@ -341,15 +364,14 @@ func (c *Controller) handleObject(obj interface{}) {
 }
 
 // newDeployment creates a new deployment for wordpress resource
-
 func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 	labels := map[string]string{
-		"app":        "nginx",
+		"app":        "wordpress",
 		"controller": wp.Name,
 	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      wp.Spec.DeploymentName,
+			Name:      wp.Name,
 			Namespace: wp.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(
@@ -368,8 +390,16 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "nginx",
-							Image: "nginx:1.14.2",
+							Name:  "wordpress",
+							Image: "wordpress:" + wp.Spec.WpVersion,
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									HostPort:      80,
+									ContainerPort: 80,
+									Protocol:      corev1.ProtocolTCP,
+								},
+							},
 						},
 					},
 				},

@@ -42,9 +42,9 @@ func main() {
 	}
 
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(
-		kubeClient, time.Second*10)
+		kubeClient, time.Second*30)
 	exampleInformerFactory := informers.NewSharedInformerFactory(
-		exampleClient, time.Second*10)
+		exampleClient, time.Second*30)
 
 	controller := NewController(kubeClient, exampleClient,
 		kubeInformerFactory.Apps().V1().Deployments(),
