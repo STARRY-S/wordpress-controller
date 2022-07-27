@@ -31,6 +31,8 @@ Just for learning Kubernetes Controller and CRD.
 
     View `http://127.0.0.1:8080`.
 
+    Or use Ingress to expose your web service.
+
 ----
 
 Refer: [sample-controller](https://github.com/kubernetes/sample-controller)
