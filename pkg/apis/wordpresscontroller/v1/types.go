@@ -19,11 +19,10 @@ type Wordpress struct {
 // the Spec of the wordpress resource
 type WordpressSpec struct {
 	DeploymentName string `json:"deploymentName"`
+	ServiceName    string `json:"serviceName"`
 	Replicas       *int32 `json:"replicas"`
 	DbVersion      string `json:"dbVersion"`
 	WpVersion      string `json:"wpVersion"`
-	DbPort         *int32 `json:"dbPort"`
-	WpPort         *int32 `json:"wpPort"`
 	DbSecretName   string `json:"dbSecretName"`
 	DbSecretKey    string `json:"dbSecretKey"`
 	DbPvcName      string `json:"dbPvcName"`

@@ -94,16 +94,6 @@ func (in *WordpressSpec) DeepCopyInto(out *WordpressSpec) {
 		*out = new(int32)
 		**out = **in
 	}
-	if in.DbPort != nil {
-		in, out := &in.DbPort, &out.DbPort
-		*out = new(int32)
-		**out = **in
-	}
-	if in.WpPort != nil {
-		in, out := &in.WpPort, &out.WpPort
-		*out = new(int32)
-		**out = **in
-	}
 	return
 }
 
