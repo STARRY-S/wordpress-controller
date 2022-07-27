@@ -9,7 +9,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
-	clientset "github.com/STARRY-S/wordpress-controller/pkg/generated/clientset/versioned"
+	wpclientset "github.com/STARRY-S/wordpress-controller/pkg/generated/clientset/versioned"
 	informers "github.com/STARRY-S/wordpress-controller/pkg/generated/informers/externalversions"
 	"github.com/STARRY-S/wordpress-controller/pkg/signals"
 )
@@ -36,22 +36,26 @@ func main() {
 		klog.Fatalf("Error building kubernetes clientset: %s", err.Error())
 	}
 
-	exampleClient, err := clientset.NewForConfig(cfg)
+	wordpressClient, err := wpclientset.NewForConfig(cfg)
 	if err != nil {
 		klog.Fatalf("Error building example clientset: %s", err.Error())
 	}
 
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(
 		kubeClient, time.Second*30)
-	exampleInformerFactory := informers.NewSharedInformerFactory(
-		exampleClient, time.Second*30)
+	wordpressInformerFactory := informers.NewSharedInformerFactory(
+		wordpressClient, time.Second*30)
+	// serviceInformerFactory := informers.NewSharedInformerFactory()
 
-	controller := NewController(kubeClient, exampleClient,
+	controller := NewController(
+		kubeClient, wordpressClient,
 		kubeInformerFactory.Apps().V1().Deployments(),
-		exampleInformerFactory.Controller().V1().Wordpresses())
+		kubeInformerFactory.Core().V1().Services(),
+		wordpressInformerFactory.Controller().V1().Wordpresses(),
+	)
 
 	kubeInformerFactory.Start(stopCh)
-	exampleInformerFactory.Start(stopCh)
+	wordpressInformerFactory.Start(stopCh)
 
 	if err = controller.Run(2, stopCh); err != nil {
 		klog.Fatalf("Error running controller: %s", err.Error())

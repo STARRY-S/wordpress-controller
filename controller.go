@@ -9,19 +9,22 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	samplev1 "github.com/STARRY-S/wordpress-controller/pkg/apis/wordpresscontroller/v1"
+	wordpressv1 "github.com/STARRY-S/wordpress-controller/pkg/apis/wordpresscontroller/v1"
 	clientset "github.com/STARRY-S/wordpress-controller/pkg/generated/clientset/versioned"
 	wordpressscheme "github.com/STARRY-S/wordpress-controller/pkg/generated/clientset/versioned/scheme"
 	informers "github.com/STARRY-S/wordpress-controller/pkg/generated/informers/externalversions/wordpresscontroller/v1"
@@ -44,8 +47,14 @@ const (
 )
 
 const (
-	WordpressMysqlVolume = "wordpress-mysql-volume"
-	WordpressHtmlVolume  = "wordpress-html-volume"
+	MysqlVolume    = "wordpress-mysql-volume"
+	HtmlVolume     = "wordpress-html-volume"
+	MysqlPortName  = "mysql"
+	HttpPortName   = "wordpress-http"
+	HttpsPortName  = "wordpress-https"
+	MysqlPortValue = 3306
+	HttpPortValue  = 80
+	HttpsPortValue = 443
 )
 
 type Controller struct {
@@ -54,9 +63,22 @@ type Controller struct {
 	// the clientset for own API group
 	wordpressClientset clientset.Interface
 
+	// deploymentsLister lists all deployments
 	deploymentsLister appslisters.DeploymentLister
+	// InformerSynced is a function that can be used to determine
+	// if an informer has synced.
+	// This is useful for determining if caches have synced.
 	deploymentsSynced cache.InformerSynced
+
+	servicesLister corelisters.ServiceLister
+
+	servicesSynced cache.InformerSynced
+
+	// wordpressesLister lists all wordpress resources
 	wordpressesLister listers.WordpressLister
+	// InformerSynced is a function that can be used to determine
+	// if an informer has synced.
+	// This is useful for determining if caches have synced.
 	wordpressesSynced cache.InformerSynced
 
 	// rate limited workqueue
@@ -69,6 +91,7 @@ func NewController(
 	kubeClientset kubernetes.Interface,
 	wordpressClientset clientset.Interface,
 	deploymentInformer appsinformers.DeploymentInformer,
+	serviceInformer coreinformers.ServiceInformer,
 	wordpressInformer informers.WordpressInformer,
 ) *Controller {
 	// Create a event broadcaster
@@ -96,6 +119,8 @@ func NewController(
 		deploymentsSynced:  deploymentInformer.Informer().HasSynced,
 		wordpressesLister:  wordpressInformer.Lister(),
 		wordpressesSynced:  wordpressInformer.Informer().HasSynced,
+		servicesLister:     serviceInformer.Lister(),
+		servicesSynced:     serviceInformer.Informer().HasSynced,
 		workqueue: workqueue.NewNamedRateLimitingQueue(
 			workqueue.DefaultControllerRateLimiter(),
 			"Wordpresses",
@@ -108,11 +133,11 @@ func NewController(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: controller.enqueueWordpress,
 			UpdateFunc: func(old, new interface{}) {
-				klog.Info("wpInformer UpdateFunc triggered")
+				klog.Info("wpInformer: UpdateFunc triggered")
 				controller.enqueueWordpress(new)
 			},
 			DeleteFunc: func(obj interface{}) {
-				klog.Info("wpInformer delete func triggered!")
+				klog.Info("wpInformer: delete func triggered!")
 			},
 		},
 	)
@@ -126,6 +151,21 @@ func NewController(
 					return
 				}
 				klog.Info("dpInformer UpdateFunc triggered")
+				controller.handleObject(newObj)
+			},
+			DeleteFunc: controller.handleObject,
+		},
+	)
+	serviceInformer.Informer().AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: controller.handleObject,
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				newSvc := newObj.(*corev1.Service)
+				oldSvc := newObj.(*corev1.Service)
+				if newSvc.ResourceVersion == oldSvc.ResourceVersion {
+					return
+				}
+				klog.Info("svcInformer UpdateFunc triggered")
 				controller.handleObject(newObj)
 			},
 			DeleteFunc: controller.handleObject,
@@ -244,27 +284,79 @@ func (c *Controller) syncHandler(key string) error {
 	}
 	deploymentName := wp.Spec.DeploymentName
 	if deploymentName == "" {
-		err2 := fmt.Errorf("%s deplotment name must be specified", key)
-		utilruntime.HandleError(err2)
+		err := fmt.Errorf("%s deplotment name must be specified", key)
+		utilruntime.HandleError(err)
+		return nil
+	}
+
+	serviceName := wp.Spec.ServiceName
+	if serviceName == "" {
+		err := fmt.Errorf("%s service name must be specified", key)
+		utilruntime.HandleError(err)
+		return nil
+	}
+
+	dbVersion := wp.Spec.DbVersion
+	if dbVersion == "" {
+		err := fmt.Errorf("%s dbVersion must be specified", key)
+		utilruntime.HandleError(err)
+		return nil
+	}
+
+	wpVersion := wp.Spec.WpVersion
+	if wpVersion == "" {
+		err := fmt.Errorf("%s wpVersion must be specified", key)
+		utilruntime.HandleError(err)
+		return nil
+	}
+
+	dbSecretName := wp.Spec.DbSecretName
+	if dbSecretName == "" {
+		err := fmt.Errorf("%s dbSecretName must be specified", key)
+		utilruntime.HandleError(err)
+		return nil
+	}
+
+	dbSecretKey := wp.Spec.DbSecretKey
+	if dbSecretKey == "" {
+		err := fmt.Errorf("%s dbSecretKey must be specified", key)
+		utilruntime.HandleError(err)
 		return nil
 	}
 
 	deployment, err := c.deploymentsLister.
 		Deployments(wp.Namespace).Get(deploymentName)
 	if errors.IsNotFound(err) {
-		klog.Info("Deployment not found, creating...")
+		klog.Info("wordpress deployment not found, creating")
 		deployment, err = c.kubeClientset.
 			AppsV1().Deployments(wp.Namespace).
 			Create(context.TODO(), newDeployment(wp), metav1.CreateOptions{})
 	}
-
 	if err != nil {
-		klog.Error("Create failed")
+		klog.Error("failed to create deployment")
+		return err
+	}
+
+	service, err := c.servicesLister.
+		Services(wp.Namespace).Get(serviceName)
+	if errors.IsNotFound(err) {
+		klog.Info("wordpress service not found, creating")
+		service, err = c.kubeClientset.CoreV1().Services(wp.Namespace).
+			Create(context.TODO(), newService(wp), metav1.CreateOptions{})
+	}
+	if err != nil {
+		klog.Error("failed to create service")
 		return err
 	}
 
 	if !metav1.IsControlledBy(deployment, wp) {
 		msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
+		c.recorder.Event(wp, corev1.EventTypeWarning, ErrResourceExists, msg)
+		return fmt.Errorf("%s", msg)
+	}
+
+	if !metav1.IsControlledBy(service, wp) {
+		msg := fmt.Sprintf(MessageResourceExists, service.Name)
 		c.recorder.Event(wp, corev1.EventTypeWarning, ErrResourceExists, msg)
 		return fmt.Errorf("%s", msg)
 	}
@@ -275,6 +367,8 @@ func (c *Controller) syncHandler(key string) error {
 			name, *wp.Spec.Replicas, *deployment.Spec.Replicas)
 		deployment, err = c.kubeClientset.AppsV1().Deployments(wp.Namespace).
 			Update(context.TODO(), newDeployment(wp), metav1.UpdateOptions{})
+		service, err = c.kubeClientset.CoreV1().Services(wp.Namespace).
+			Update(context.TODO(), newService(wp), metav1.UpdateOptions{})
 	}
 
 	if err != nil {
@@ -296,7 +390,7 @@ func (c *Controller) syncHandler(key string) error {
 }
 
 func (c *Controller) updateWordpressStatus(
-	wp *samplev1.Wordpress,
+	wp *wordpressv1.Wordpress,
 	deployment *appsv1.Deployment,
 ) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
@@ -346,8 +440,8 @@ func (c *Controller) handleObject(obj interface{}) {
 			return
 		}
 
-		wp, err := c.wordpressesLister.Wordpresses(object.GetNamespace()).
-			Get(ownerRef.Name)
+		wp, err := c.wordpressesLister.
+			Wordpresses(object.GetNamespace()).Get(ownerRef.Name)
 		if err != nil {
 			klog.Infof("ignoring orphaned object %s/%s of wordpress %s",
 				object.GetNamespace(), object.GetName(), ownerRef.Name)
@@ -359,14 +453,14 @@ func (c *Controller) handleObject(obj interface{}) {
 }
 
 // newDeployment creates a new deployment for wordpress and mysql resource
-func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
+func newDeployment(wp *wordpressv1.Wordpress) *appsv1.Deployment {
 	labels := map[string]string{
 		"app":        "wordpress",
 		"controller": wp.Name,
 	}
 	volumes := []corev1.Volume{
 		{
-			Name: WordpressMysqlVolume,
+			Name: MysqlVolume,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: wp.Spec.DbPvcName,
@@ -375,7 +469,7 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 			},
 		},
 		{
-			Name: WordpressHtmlVolume,
+			Name: HtmlVolume,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: wp.Spec.WpPvcName,
@@ -390,9 +484,13 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 			Image: "wordpress:" + wp.Spec.WpVersion,
 			Ports: []corev1.ContainerPort{
 				{
-					Name:          "http",
-					HostPort:      *wp.Spec.WpPort,
-					ContainerPort: 80,
+					Name:          HttpPortName,
+					ContainerPort: HttpPortValue,
+					Protocol:      corev1.ProtocolTCP,
+				},
+				{
+					Name:          HttpsPortName,
+					ContainerPort: HttpsPortValue,
 					Protocol:      corev1.ProtocolTCP,
 				},
 			},
@@ -416,7 +514,7 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      WordpressHtmlVolume,
+					Name:      HtmlVolume,
 					ReadOnly:  false,
 					MountPath: "/var/www/html",
 				},
@@ -427,9 +525,10 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 			Image: "mysql:" + wp.Spec.DbVersion,
 			Ports: []corev1.ContainerPort{
 				{
-					Name:          "mysql",
-					HostPort:      *wp.Spec.DbPort,
-					ContainerPort: 3306,
+					Name: "mysql",
+					// HostPort is 0 since we do not expose mysql database
+					// outside of the pod
+					ContainerPort: MysqlPortValue,
 					Protocol:      corev1.ProtocolTCP,
 				},
 			},
@@ -448,7 +547,7 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      WordpressMysqlVolume,
+					Name:      MysqlVolume,
 					ReadOnly:  false,
 					MountPath: "/var/lib/mysql",
 				},
@@ -461,7 +560,7 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 			Namespace: wp.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(
-					wp, samplev1.SchemeGroupVersion.WithKind("Wordpress")),
+					wp, wordpressv1.SchemeGroupVersion.WithKind("Wordpress")),
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -481,3 +580,79 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 		},
 	}
 }
+
+// Create a ClusterIP service for wordpress web resource
+func newService(wp *wordpressv1.Wordpress) *corev1.Service {
+	service := corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      wp.Spec.ServiceName,
+			Namespace: wp.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(
+					wp, wordpressv1.SchemeGroupVersion.WithKind("Wordpress")),
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:     HttpPortName,
+					Protocol: corev1.ProtocolTCP,
+					Port:     80, // exposed port
+					// the port to access on the pods targeted by the service
+					TargetPort: intstr.IntOrString{
+						StrVal: HttpPortName,
+					},
+				},
+				{
+					Name:     HttpsPortName,
+					Protocol: corev1.ProtocolTCP,
+					Port:     443, // exposed port
+					// the port to access on the pods targeted by the service
+					TargetPort: intstr.IntOrString{
+						StrVal: HttpsPortName,
+					},
+				},
+			},
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}
+	return &service
+}
+
+// // Create new ingress for wordpress service
+// func newIngress(wp *wordpressv1.Wordpress) *extensionsv1beta1.Ingress {
+// 	pathType := extensionsv1beta1.PathTypePrefix
+// 	ingress := extensionsv1beta1.Ingress{
+// 		ObjectMeta: metav1.ObjectMeta{
+// 			Name:      wp.Name + "-ingress",
+// 			Namespace: wp.Namespace,
+// 			OwnerReferences: []metav1.OwnerReference{
+// 				*metav1.NewControllerRef(
+// 					wp, wordpressv1.SchemeGroupVersion.WithKind("Wordpress")),
+// 			},
+// 		},
+// 		Spec: extensionsv1beta1.IngressSpec{
+// 			Rules: []extensionsv1beta1.IngressRule{
+// 				{
+// 					IngressRuleValue: extensionsv1beta1.IngressRuleValue{
+// 						HTTP: &extensionsv1beta1.HTTPIngressRuleValue{
+// 							Paths: []extensionsv1beta1.HTTPIngressPath{
+// 								{
+// 									Path: "/",
+// 									Backend: extensionsv1beta1.IngressBackend{
+// 										ServiceName: wp.Name + "-service",
+// 										ServicePort: intstr.IntOrString{
+// 											StrVal: HttpPortName,
+// 										},
+// 									},
+// 									PathType: &pathType,
+// 								},
+// 							},
+// 						},
+// 					},
+// 				},
+// 			},
+// 		},
+// 	}
+// 	return &ingress
+// }
