@@ -55,6 +55,7 @@ const (
 	MysqlPortValue = 3306
 	HttpPortValue  = 80
 	HttpsPortValue = 443
+	AppName        = "Wordpress"
 )
 
 type Controller struct {
@@ -455,7 +456,7 @@ func (c *Controller) handleObject(obj interface{}) {
 // newDeployment creates a new deployment for wordpress and mysql resource
 func newDeployment(wp *wordpressv1.Wordpress) *appsv1.Deployment {
 	labels := map[string]string{
-		"app":        "wordpress",
+		"app":        AppName,
 		"controller": wp.Name,
 	}
 	volumes := []corev1.Volume{
@@ -614,6 +615,9 @@ func newService(wp *wordpressv1.Wordpress) *corev1.Service {
 				},
 			},
 			Type: corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{
+				"app": AppName,
+			},
 		},
 	}
 	return &service
