@@ -43,6 +43,11 @@ const (
 	MessageResourceSynced = "Wordpress synced successfully"
 )
 
+const (
+	WordpressMysqlVolume = "wordpress-mysql-volume"
+	WordpressHtmlVolume  = "wordpress-html-volume"
+)
+
 type Controller struct {
 	// standard kubernetes clientset
 	kubeClientset kubernetes.Interface
@@ -103,11 +108,11 @@ func NewController(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: controller.enqueueWordpress,
 			UpdateFunc: func(old, new interface{}) {
-				fmt.Println("XXXX wpInformer UpdateFunc triggered")
+				klog.Info("wpInformer UpdateFunc triggered")
 				controller.enqueueWordpress(new)
 			},
 			DeleteFunc: func(obj interface{}) {
-				fmt.Println("XXXX wpInformer delete func triggered!")
+				klog.Info("wpInformer delete func triggered!")
 			},
 		},
 	)
@@ -115,12 +120,12 @@ func NewController(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: controller.handleObject,
 			UpdateFunc: func(oldObj, newObj interface{}) {
-				fmt.Println("XXXX dpInformer UpdateFunc triggered")
 				newDepl := newObj.(*appsv1.Deployment)
 				oldDepl := oldObj.(*appsv1.Deployment)
 				if newDepl.ResourceVersion == oldDepl.ResourceVersion {
 					return
 				}
+				klog.Info("dpInformer UpdateFunc triggered")
 				controller.handleObject(newObj)
 			},
 			DeleteFunc: controller.handleObject,
@@ -234,7 +239,7 @@ func (c *Controller) syncHandler(key string) error {
 					key))
 			return nil
 		}
-		klog.Info("XXXX0")
+		klog.Error("Get failed")
 		return err
 	}
 	deploymentName := wp.Spec.DeploymentName
@@ -247,14 +252,14 @@ func (c *Controller) syncHandler(key string) error {
 	deployment, err := c.deploymentsLister.
 		Deployments(wp.Namespace).Get(deploymentName)
 	if errors.IsNotFound(err) {
-		klog.Info("XXXX not found")
+		klog.Info("Deployment not found, creating...")
 		deployment, err = c.kubeClientset.
 			AppsV1().Deployments(wp.Namespace).
 			Create(context.TODO(), newDeployment(wp), metav1.CreateOptions{})
 	}
 
 	if err != nil {
-		klog.Info("XXXX2")
+		klog.Error("Create failed")
 		return err
 	}
 
@@ -273,7 +278,7 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	if err != nil {
-		klog.Info("XXXX3")
+		klog.Error("Update failed")
 		return err
 	}
 
@@ -281,7 +286,7 @@ func (c *Controller) syncHandler(key string) error {
 	// current state of the world
 	err = c.updateWordpressStatus(wp, deployment)
 	if err != nil {
-		klog.Info("XXXX4")
+		klog.Error("updateWordpressStatus failed")
 		return err
 	}
 
@@ -300,17 +305,8 @@ func (c *Controller) updateWordpressStatus(
 	wpCopy := wp.DeepCopy()
 	wpCopy.Status.AvailableReplicas = deployment.Status.Replicas
 	wpInterface := c.wordpressClientset.ControllerV1().Wordpresses(wp.Namespace)
-	klog.Infof("Name: %s, Namespace: %s, WpVersion: %s, DeploymentName: %s",
-		wpCopy.Name, wpCopy.Namespace, wpCopy.Spec.WpVersion,
-		wpCopy.Spec.DeploymentName)
-	klog.Infof("Group: %s",
-		wpCopy.GroupVersionKind().Group)
 	_, err := wpInterface.
 		UpdateStatus(context.TODO(), wpCopy, metav1.UpdateOptions{})
-
-	if err != nil {
-		klog.Infof("---XXXX error: %s", err.Error())
-	}
 	return err
 }
 
@@ -322,7 +318,6 @@ func (c *Controller) enqueueWordpress(obj interface{}) {
 		utilruntime.HandleError(err)
 		return
 	}
-	klog.Info("XXXXXXXX--- key: ", key)
 	c.workqueue.Add(key)
 }
 
@@ -363,11 +358,102 @@ func (c *Controller) handleObject(obj interface{}) {
 	}
 }
 
-// newDeployment creates a new deployment for wordpress resource
+// newDeployment creates a new deployment for wordpress and mysql resource
 func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 	labels := map[string]string{
 		"app":        "wordpress",
 		"controller": wp.Name,
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: WordpressMysqlVolume,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: wp.Spec.DbPvcName,
+					ReadOnly:  false,
+				},
+			},
+		},
+		{
+			Name: WordpressHtmlVolume,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: wp.Spec.WpPvcName,
+					ReadOnly:  false,
+				},
+			},
+		},
+	}
+	containers := []corev1.Container{
+		{
+			Name:  "wordpress",
+			Image: "wordpress:" + wp.Spec.WpVersion,
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "http",
+					HostPort:      *wp.Spec.WpPort,
+					ContainerPort: 80,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			Env: []corev1.EnvVar{
+				{
+					Name:  "WORDPRESS_DB_HOST",
+					Value: "127.0.0.1", // do not use localhost here
+				},
+				{
+					Name: "WORDPRESS_DB_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: wp.Spec.DbSecretName,
+							},
+							Key: wp.Spec.DbSecretKey,
+						},
+					},
+				},
+			},
+
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      WordpressHtmlVolume,
+					ReadOnly:  false,
+					MountPath: "/var/www/html",
+				},
+			},
+		},
+		{
+			Name:  "mysql",
+			Image: "mysql:" + wp.Spec.DbVersion,
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "mysql",
+					HostPort:      *wp.Spec.DbPort,
+					ContainerPort: 3306,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			Env: []corev1.EnvVar{
+				{
+					Name: "MYSQL_ROOT_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: wp.Spec.DbSecretName,
+							},
+							Key: wp.Spec.DbSecretKey,
+						},
+					},
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      WordpressMysqlVolume,
+					ReadOnly:  false,
+					MountPath: "/var/lib/mysql",
+				},
+			},
+		},
 	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -388,20 +474,8 @@ func newDeployment(wp *samplev1.Wordpress) *appsv1.Deployment {
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "wordpress",
-							Image: "wordpress:" + wp.Spec.WpVersion,
-							Ports: []corev1.ContainerPort{
-								{
-									Name:          "http",
-									HostPort:      80,
-									ContainerPort: 80,
-									Protocol:      corev1.ProtocolTCP,
-								},
-							},
-						},
-					},
+					Containers: containers,
+					Volumes:    volumes,
 				},
 			},
 		},
