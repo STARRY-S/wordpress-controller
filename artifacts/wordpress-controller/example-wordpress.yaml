@@ -3,13 +3,12 @@ kind: Wordpress
 metadata:
   name: wordpress-example
 spec:
-  dbVersion: "5.7"
-  wpVersion: "4.8-apache"
+  dbVersion: "5.7"  # mysql:<dbVersion>
+  wpVersion: "4.8-apache" # wordpress:<wpVersion>
   dbSecretName: "mysql-passwd"
   dbSecretKey: "password"
   dbPvcName: "mysql-pvc"
   wpPvcName: "wordpress-pvc"
-  dbPort: 3306
-  wpPort: 80
   deploymentName: wordpress-example
+  serviceName: "wordpress-example-service"
   replicas: 1
