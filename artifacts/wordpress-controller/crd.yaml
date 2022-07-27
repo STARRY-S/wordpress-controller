@@ -20,10 +20,26 @@ spec:
               properties:
                 deploymentName:
                   type: string
+                dbSecretName:
+                  type: string
+                dbSecretKey:
+                  type: string
                 dbVersion:
                   type: string
                 wpVersion:
                   type: string
+                dbPvcName:
+                  type: string
+                wpPvcName:
+                  type: string
+                dbPort:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                wpPort:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
                 replicas:
                   type: integer
                   minimum: 1

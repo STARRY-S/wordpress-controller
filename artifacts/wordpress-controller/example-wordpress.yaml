@@ -5,5 +5,11 @@ metadata:
 spec:
   dbVersion: "5.7"
   wpVersion: "4.8-apache"
+  dbSecretName: "mysql-passwd"
+  dbSecretKey: "password"
+  dbPvcName: "mysql-pvc"
+  wpPvcName: "wordpress-pvc"
+  dbPort: 3306
+  wpPort: 80
   deploymentName: wordpress-example
   replicas: 1
